@@ -42,13 +42,14 @@ class EventAction(BaseModel):
 models.Base.metadata.create_all(bind=engine)
 
 # CORS
+# main.py → ALLOWED_ORIGINS
 ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
+    "http://localhost:3000", 
+    "https://maison-or-api.onrender.com",  # 🔥 Render
+    "*"  # DEV
 ]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
