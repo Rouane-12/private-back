@@ -80,29 +80,55 @@ def _event_public_dict(event: models.Event) -> dict:
         "id": event.id,
         "title": event.title,
         "date": event.date.isoformat(),
-
-        # ✅ IMAGE (depuis apartment photos)
         "cover_url": (
             apartment.photos[0].url
             if apartment and hasattr(apartment, "photos") and apartment.photos
             else None
         ),
-
-        # ✅ PRIX
         "price": apartment.price if apartment else 0,
-
-        # ✅ VILLE
         "city": apartment.city if apartment else None,
-
-        # ✅ AUTRES INFOS UTILES POUR TON FRONT
-        "duration_hours": 2,  # temporaire si tu n'as pas encore ce champ
-
+        "duration_hours": 2,
         "status": event.status,
         "woman_status": event.woman_status,
         "owner_status": event.owner_status,
-                "status": event.status,  # 👈 IMPORTANT !
         "status_display": "confirmé" if event.status == "confirmed" else "en attente",
+        "message": getattr(event, "message", None),
+        "location_exact": getattr(event, "location_exact", None),
 
+        # ✅ REQUESTER
+        "requester": {
+            "id": event.requester.id,
+            "first_name": event.requester.first_name,
+            "username": event.requester.username,
+        } if event.requester else None,
+
+        # ✅ HÔTE (woman)
+        "woman": {
+            "id": event.woman.id,
+            "first_name": event.woman.first_name,
+            "username": event.woman.username,
+        } if event.woman else None,
+
+        # ✅ APPARTEMENT + OWNER
+        "apartment": {
+            "id": apartment.id,
+            "title": apartment.title,
+            "city": apartment.city,
+            "price": apartment.price,
+            "address": getattr(apartment, "address", None),
+            "cover_url": (
+                apartment.photos[0].url
+                if hasattr(apartment, "photos") and apartment.photos
+                else None
+            ),
+            "owner": {
+                "id": apartment.owner.id,
+                "first_name": apartment.owner.first_name,
+                "username": apartment.owner.username,
+            } if apartment.owner else None,
+        } if apartment else None,
+
+        # Compat front (owner = woman pour affichage carte)
         "owner": {
             "id": event.woman.id,
             "first_name": event.woman.first_name,
@@ -446,65 +472,51 @@ def create_event(
 def list_events(city: str = None, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     role = current_user.role
     user_id = current_user.id
-    print(f"🔍 [{role}] User {user_id}")
+
+    base_query = db.query(models.Event).options(
+        joinedload(models.Event.requester),
+        joinedload(models.Event.woman),
+        joinedload(models.Event.apartment).joinedload(models.Apartment.owner),
+        joinedload(models.Event.apartment).joinedload(models.Apartment.photos),
+    )
 
     if role == "homme":
-        # Ses demandes
-        events = db.query(models.Event).filter(
-            models.Event.requester_id == user_id
-        ).all()
-        print(f"👨 Homme: {len(events)}")
-
+        events = base_query.filter(models.Event.requester_id == user_id).all()
     elif role == "femme":
-        # Ses hébergements (woman_id)
-        events = db.query(models.Event).filter(
-            models.Event.woman_id == user_id  # 👈 CORRECT !
-        ).all()
-        print(f"👩 Femme: {len(events)}")
-
+        events = base_query.filter(models.Event.woman_id == user_id).all()
     elif role == "professionnel":
-        # Ses apparts (JOIN)
-        events = db.query(models.Event).join(
+        events = base_query.join(
             models.Apartment, models.Event.apartment_id == models.Apartment.id
-        ).filter(
-            models.Apartment.owner_id == user_id
-        ).all()
-        print(f"🏢 Pro: {len(events)}")
-
+        ).filter(models.Apartment.owner_id == user_id).all()
     else:
         events = []
-        print("❌ Rôle inconnu")
 
-    # City filter
     if city and city != 'Toutes':
-        events = [e for e in events if e.city == city]
+        events = [e for e in events if e.apartment and e.apartment.city == city]
 
-    # Status FR
-    for e in events:
-        e.status_display = "confirmé" if getattr(e, 'status', None) == "confirmed" else "en attente"
-
-    print(f"📊 Retour: {len(events)} events")
     return [_event_public_dict(e) for e in events]
-
     
 
 @app.get("/events/mine")
 def my_events(
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)  # ✅ TOUS les rôles !
+    current_user: models.User = Depends(get_current_user)
 ):
+    base_query = db.query(models.Event).options(
+        joinedload(models.Event.requester),
+        joinedload(models.Event.woman),
+        joinedload(models.Event.apartment).joinedload(models.Apartment.owner),
+        joinedload(models.Event.apartment).joinedload(models.Apartment.photos),
+    )
+
     if current_user.role == "femme":
-        events = db.query(models.Event).filter(
-            models.Event.woman_id == current_user.id
-        ).order_by(models.Event.date.desc()).all()
+        events = base_query.filter(models.Event.woman_id == current_user.id).order_by(models.Event.date.desc()).all()
     elif current_user.role == "professionnel":
-        events = db.query(models.Event).join(models.Apartment).filter(
+        events = base_query.join(models.Apartment).filter(
             models.Apartment.owner_id == current_user.id
         ).order_by(models.Event.date.desc()).all()
-    elif current_user.role == "homme":  # ✅ AJOUTÉ !
-        events = db.query(models.Event).filter(
-            models.Event.requester_id == current_user.id  # Ses demandes
-        ).order_by(models.Event.date.desc()).all()
+    elif current_user.role == "homme":
+        events = base_query.filter(models.Event.requester_id == current_user.id).order_by(models.Event.date.desc()).all()
     else:
         events = []
     
@@ -731,8 +743,8 @@ def get_all_photos(
             "unlocked": (not p.is_premium) or (p.id in unlocked_ids),
             "owner_id": p.owner_id,
             "owner_name": p.owner.first_name,
-            "owner_profile_image": p.owner.profile_image,  # ✅ AJOUTÉ !
-
+            "owner_profile_image": p.owner.profile_image,
+            "owner_role": p.owner.role,  # ✅ AJOUT
         }
         for p in photos
     ]
@@ -837,7 +849,7 @@ def verify_photo_payment(
     success, amount = is_transaction_successful(data.transaction_id)
     if not success:
         raise HTTPException(status_code=402, detail="Transaction Kkiapay non confirmée")
-    if amount < photo.price:
+    if amount < photo.price * 0.95:
         raise HTTPException(status_code=402, detail=f"Montant insuffisant (attendu {photo.price} FCFA)")
 
     unlock = models.PhotoUnlock(
@@ -1062,15 +1074,15 @@ def get_me(current_user: models.User = Depends(get_current_user)):
 @app.get("/apartments/mine")
 def get_my_apartments(
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)  
+    current_user: models.User = Depends(get_current_user)
 ):
     if current_user.role != "professionnel":
         raise HTTPException(status_code=403, detail="Réservé aux professionnels")
-    
+
     apartments = db.query(models.Apartment).filter(
         models.Apartment.owner_id == current_user.id
     ).order_by(models.Apartment.created_at.desc()).all()
-    
+
     return [
         {
             "id": a.id,
@@ -1080,11 +1092,18 @@ def get_my_apartments(
             "price": float(a.price),
             "is_active": a.is_active,
             "created_at": a.created_at.isoformat() if a.created_at else None,
-            "photos": []
+            "cover_url": a.photos[0].url if a.photos else None,
+            "photos": [
+                {
+                    "id": p.id,
+                    "url": p.url,
+                    "is_cover": p.is_cover
+                }
+                for p in a.photos
+            ]
         }
         for a in apartments
     ]
-
 
 @app.post("/apartments", status_code=201)
 def create_apartment(
@@ -1121,13 +1140,16 @@ def list_apartments(db: Session = Depends(get_db)):
             "price": float(a.price),
             "is_active": a.is_active,
             "owner_id": a.owner_id,
-            "owner_name": a.owner.first_name,           # ✅
-            "owner_profile_image": a.owner.profile_image, # ✅
-            "cover_url": (a.photos[0].url if a.photos else None) if hasattr(a, 'photos') and a.photos else None,
+            "owner_name": a.owner.first_name,
+            "owner_profile_image": a.owner.profile_image,
+            "cover_url": a.photos[0].url if a.photos else None,
+            "photos": [
+                {"id": p.id, "url": p.url, "is_cover": p.is_cover}
+                for p in a.photos
+            ],
         }
         for a in apartments
     ]
-
 
 
 @app.post("/apartments/{apartment_id}/photos", status_code=201)
@@ -1203,39 +1225,44 @@ def delete_apartment_photo(
 def event_action(
     event_id: int, 
     payload: EventAction, 
-    db: Session = Depends(get_db),  # 👈 AJOUTÉ !
+    db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    event = db.query(models.Event).filter(models.Event.id == event_id).first()  # models.Event
+    event = db.query(models.Event).options(
+        joinedload(models.Event.requester),
+        joinedload(models.Event.woman),
+        joinedload(models.Event.apartment).joinedload(models.Apartment.owner),
+        joinedload(models.Event.apartment).joinedload(models.Apartment.photos),
+    ).filter(models.Event.id == event_id).first()
     
     if not event:
         raise HTTPException(status_code=404, detail="Événement introuvable")
 
     action = payload.action
 
-    # 👇 FEMME
     if current_user.role == "femme":
         if action == "accept":
             event.woman_status = "accepted"
         elif action == "refuse":
             event.woman_status = "refused"
 
-    # 👇 PROFESSIONNEL
     if current_user.role == "professionnel":
         if action == "accept":
             event.owner_status = "accepted"
         elif action == "refuse":
             event.owner_status = "refused"
 
-    # 💥 CHECK GLOBAL STATUS
+    # Homme peut annuler
+    if current_user.role == "homme" and action == "cancel":
+        event.status = "cancelled"
+
     if event.woman_status == "accepted" and event.owner_status == "accepted":
         event.status = "confirmed"
-        # 🔔 NOTIFICATION HOMME (corrige create_notification après)
-        # create_notification(event.requester_id, "event_confirmed", "Votre demande a été acceptée 🎉")
 
     db.commit()
     db.refresh(event)
-    return _event_public_dict(event)  # Retourne format correct
+    return _event_public_dict(event)
+
 
 @app.get("/notifications")
 def get_notifications(
